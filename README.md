@@ -1,20 +1,45 @@
 # vban-server
 
-UDP server implementation for the VBAN control protocol and real-time state broadcasts.
+A VBAN control server. It listens on UDP, answers pings, streams RT state
+packets to subscribers, and hands parsed requests to whatever it controls.
 
-## Features
+Every other VBAN library I found is a client. This is the other side, so
+existing clients drive it without changes. `vban-cmd` logs in against it, reads
+state back, and writes parameters.
 
-- **VBAN-TEXT & Service handling**: Receives and dispatches incoming commands.
-- **RT State broadcasting**: Streams real-time meter levels, fader states, and labels to subscribed clients.
-- **Submodule support**: Bundles `vban-common` as a git submodule.
+## Use
 
-## Submodules
+```rust
+let server = Server::start(6980, Identity::default())?;
 
-To clone with submodules:
-```bash
-git clone --recurse-submodules https://github.com/pipemeeter/vban-server.git
+loop {
+    for Request::Set(parameters) in server.poll() {
+        // apply them to your own state
+    }
+    server.publish(state);
+}
 ```
+
+The socket runs on its own thread. `poll` never blocks. Nothing in here knows
+what a mixer is.
+
+## Notes
+
+The socket carries a read timeout. Without one the thread sits in `recv_from`
+and a subscribed client hears nothing until some other packet happens to
+arrive.
+
+State is shared through a mutex rather than sent down a channel. A subscriber
+wants the current state, not every frame since it last looked.
+
+A pong has to be the full 704 bytes. Clients check the length before they will
+believe one, so a bare header is not a short answer, it is no answer.
+
+## Status
+
+TEXT and SERVICE work. AUDIO, SERIAL and MIDI are not implemented. Neither are
+query replies, the reply a client expects when a request ends in `?`.
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+Public domain. See UNLICENSE.
