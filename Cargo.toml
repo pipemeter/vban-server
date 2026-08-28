@@ -12,7 +12,7 @@ name = "vban_server"
 path = "src/lib.rs"
 
 [dependencies]
-vban-common = { path = "vban-common", default-features = false }
+vban-common = { version = "0.1.0", path = "../vban-common", default-features = false }
 log = "0.4"
 
 [lints.rust]
