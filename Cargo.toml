@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["PipeMeeter Team <dev@pipemeeter.org>"]
 description = "Asynchronous / UDP server implementation for VBAN control and real-time state streams"
 license = "Unlicense"
-repository = "https://github.com/pipemeeter/vban-server"
+repository = "https://github.com/pipemeter/vban-server"
 
 [lib]
 name = "vban_server"
