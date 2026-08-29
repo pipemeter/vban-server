@@ -197,6 +197,12 @@ fn serve(
 
         match packet {
             vban_common::Packet::Text { body, header } => {
+                // A request ending in `?` is a question, and the client is
+                // waiting on the answer rather than sending a change.
+                if body.trim_end().ends_with('?') {
+                    answer_query(socket, from, &body, state, header.frame);
+                    continue;
+                }
                 let parameters = vban_common::parse_request(&body);
                 if parameters.is_empty() {
                     log::debug!("empty VBAN request from {from}: {body:?}");
@@ -281,6 +287,89 @@ fn send_state(
         if let Err(err) = socket.send_to(&packet, who) {
             log::debug!("could not send state to {who}: {err}");
         }
+    }
+}
+
+/// Answer a query, reading from the state the owner last published.
+///
+/// The TEXT channel is otherwise one-way, so this is the only way a client
+/// gets a specific value back without subscribing to the whole state
+/// packet. It answers from what has already been published rather than
+/// asking the owner, which keeps the socket thread from blocking on it.
+fn answer_query(
+    socket: &UdpSocket,
+    from: SocketAddr,
+    body: &str,
+    state: &Arc<Mutex<rt::State>>,
+    frame: u32,
+) {
+    let Ok(held) = state.lock() else {
+        return;
+    };
+    let mut answers = Vec::new();
+    for name in body.trim_end().trim_end_matches('?').split([';', '\n']) {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match answer_one(&held, name) {
+            Some(value) => answers.push(format!("{name}={value};")),
+            // Named back rather than dropped, so a client can tell a
+            // parameter we do not answer from one that is simply zero.
+            None => answers.push(format!("{name}=?;")),
+        }
+    }
+    drop(held);
+
+    let payload = answers.join("");
+    log::info!("VBAN query from {from}: {} -> {payload}", body.trim());
+    let reply = vban_common::encode(&vban_common::reply_header(frame), payload.as_bytes());
+    if let Err(err) = socket.send_to(&reply, from) {
+        log::debug!("could not answer {from}: {err}");
+    }
+}
+
+/// One parameter's current value, as text.
+fn answer_one(state: &rt::State, name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    let (head, field) = lower.split_once('.')?;
+    let index: usize = head
+        .split_once('[')
+        .and_then(|(_, rest)| rest.strip_suffix(']'))
+        .and_then(|digits| digits.parse().ok())?;
+
+    let strip = head.starts_with("strip");
+    let word = if strip {
+        *state.strip_state.get(index)?
+    } else {
+        *state.bus_state.get(index)?
+    };
+    let gain = if strip {
+        *state.strip_gain.first()?.get(index)?
+    } else {
+        *state.bus_gain.get(index)?
+    };
+    let labels = if strip {
+        &state.strip_labels
+    } else {
+        &state.bus_labels
+    };
+
+    let bit = |mask: u32| Some(u8::from(word & mask != 0).to_string());
+    match field {
+        "gain" => Some(format!("{gain:.1}")),
+        "mute" => bit(rt::state::MUTE),
+        "solo" => bit(rt::state::SOLO),
+        "mono" => bit(rt::state::MONO),
+        "eq.on" | "eqon" => bit(rt::state::EQ_ON),
+        "sel" => bit(rt::state::SEL),
+        "label" => labels.get(index).cloned(),
+        _ => rt::state::BUS_A
+            .iter()
+            .chain(rt::state::BUS_B.iter())
+            .zip(["a1", "a2", "a3", "a4", "a5", "b1", "b2", "b3"])
+            .find(|(_, route)| *route == field)
+            .and_then(|(mask, _)| bit(*mask)),
     }
 }
 
