@@ -76,8 +76,6 @@ impl Server {
     /// feature could not is the wrong trade.
     #[must_use]
     pub fn start(port: u16, identity: Identity) -> Option<Self> {
-        // All interfaces: the point of the network protocol is being
-        // reachable from the machine that runs the stream deck.
         let socket = match UdpSocket::bind(("0.0.0.0", port)) {
             Ok(socket) => socket,
             Err(err) => {
@@ -90,10 +88,6 @@ impl Server {
             .map_or_else(|_| format!("0.0.0.0:{port}"), |addr| addr.to_string());
         log::info!("VBAN control server listening on {address}");
 
-        // Woken regularly whether or not anything arrives, so subscribers
-        // are served on time rather than only when a request happens to
-        // come in. Without this the thread blocks in recv_from and a
-        // subscribed client hears nothing until someone sends a request.
         if let Err(err) = socket.set_read_timeout(Some(TICK)) {
             log::warn!("could not set the VBAN read timeout: {err}");
         }
@@ -149,21 +143,15 @@ fn serve(
     state: &Arc<Mutex<rt::State>>,
 ) {
     let mut buffer = [0u8; vban_common::MAX_PACKET_SIZE];
-    // Who is subscribed, and until when. A subscription is renewed by
-    // asking again, which is how the protocol has a client say it is still
-    // there - so one that goes away stops being sent to on its own.
     let mut subscribers: HashMap<SocketAddr, Instant> = HashMap::new();
     let mut frame: u32 = 0;
     let mut next_send = Instant::now();
 
     loop {
-        // Due first, so a burst of requests cannot starve the subscribers.
         if Instant::now() >= next_send {
             frame = frame.wrapping_add(1);
             send_state(socket, &mut subscribers, state, frame);
             next_send += TICK;
-            // If we fell behind - a slow frame, a suspended machine - the
-            // next send is now rather than a burst catching up.
             if next_send < Instant::now() {
                 next_send = Instant::now() + TICK;
             }
@@ -171,8 +159,6 @@ fn serve(
 
         let (read, from) = match socket.recv_from(&mut buffer) {
             Ok(got) => got,
-            // A timeout is the ordinary case, not a failure: it is what
-            // wakes this loop to send state.
             Err(err)
                 if matches!(
                     err.kind(),
@@ -187,9 +173,6 @@ fn serve(
             }
         };
 
-        // Anything that is not VBAN is ignored in silence at trace level.
-        // This is an open UDP port; it will receive scans and strays, and
-        // logging each one at warn would bury the real traffic.
         let Some(packet) = vban_common::parse(&buffer[..read]) else {
             log::trace!("ignoring {read} bytes from {from} that are not VBAN");
             continue;
@@ -197,8 +180,6 @@ fn serve(
 
         match packet {
             vban_common::Packet::Text { body, header } => {
-                // A request ending in `?` is a question, and the client is
-                // waiting on the answer rather than sending a change.
                 if body.trim_end().ends_with('?') {
                     answer_query(socket, from, &body, state, header.frame);
                     continue;
@@ -216,7 +197,6 @@ fn serve(
                     body.trim()
                 );
                 if sender.send(Request::Set(parameters)).is_err() {
-                    // The owner is gone. Nothing left to control.
                     return;
                 }
             }
@@ -226,10 +206,6 @@ fn serve(
                 timeout,
             } => {
                 if let vban_common::Service::RegisterRt = service {
-                    // The fourth format byte is how many seconds it wants.
-                    // Zero would mean a subscription that expires the
-                    // instant it is made, so it is read as the protocol's
-                    // usual default instead.
                     let seconds = if timeout == 0 { 15 } else { u64::from(timeout) };
                     let until = Instant::now() + Duration::from_secs(seconds);
                     if subscribers.insert(from, until).is_none() {
@@ -274,8 +250,6 @@ fn send_state(
         return;
     }
 
-    // Built once for everyone: the packet does not depend on who is
-    // asking, and a dozen subscribers should not mean a dozen copies.
     let Ok(held) = state.lock() else {
         return;
     };
@@ -314,8 +288,6 @@ fn answer_query(
         }
         match answer_one(&held, name) {
             Some(value) => answers.push(format!("{name}={value};")),
-            // Named back rather than dropped, so a client can tell a
-            // parameter we do not answer from one that is simply zero.
             None => answers.push(format!("{name}=?;")),
         }
     }
@@ -383,21 +355,12 @@ fn service_packet(
 ) {
     match service {
         vban_common::Service::Ping => {
-            // A pong describes what answered, and it has to be the full
-            // size: a client checks the packet's length before it will
-            // believe it, so a bare header is not a short answer but no
-            // answer at all.
             let body = vban_common::pong::payload(&identity.application, &identity.host);
             let reply = vban_common::encode(&vban_common::pong_header(frame), &body);
             if let Err(err) = socket.send_to(&reply, from) {
                 log::debug!("could not pong {from}: {err}");
             }
         }
-        // Subscriptions are accepted and not yet served: the state packet
-        // is the next piece of work. Saying so in the log beats a client
-        // waiting on packets that never come, which is exactly how a real
-        // client behaves against this today - it logs in, subscribes, and
-        // then waits.
         other => log::debug!("VBAN service {other:?} from {from} is not answered yet"),
     }
 }
