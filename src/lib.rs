@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryIter};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,6 +48,12 @@ pub struct Server {
     /// channel: a subscriber wants the latest, not every frame since it
     /// last looked, and a channel would queue them all up.
     state: Arc<Mutex<rt::State>>,
+    /// How many clients are currently subscribed.
+    ///
+    /// An atomic rather than another mutex: it is written by the socket
+    /// thread once a tick and read by the interface once a frame, and
+    /// neither has anything to say to the other beyond the number.
+    clients: Arc<AtomicUsize>,
 }
 
 /// How a server describes itself when a client asks.
@@ -94,16 +101,19 @@ impl Server {
 
         let state = Arc::new(Mutex::new(rt::State::default()));
         let shared = Arc::clone(&state);
+        let clients = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&clients);
         let (sender, requests) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("vban-control".to_owned())
-            .spawn(move || serve(&socket, &sender, &identity, &shared))
+            .spawn(move || serve(&socket, &sender, &identity, &shared, &counted))
             .ok()?;
 
         Some(Self {
             requests,
             address,
             state,
+            clients,
         })
     }
 
@@ -125,6 +135,15 @@ impl Server {
         self.requests.try_iter()
     }
 
+    /// How many clients are subscribed right now.
+    ///
+    /// Drives the R lamps in the banner, which is what the original does
+    /// with the count of applications holding its remote API open.
+    #[must_use]
+    pub fn clients(&self) -> usize {
+        self.clients.load(Ordering::Relaxed)
+    }
+
     #[must_use]
     pub fn address(&self) -> &str {
         &self.address
@@ -141,6 +160,7 @@ fn serve(
     sender: &Sender<Request>,
     identity: &Identity,
     state: &Arc<Mutex<rt::State>>,
+    clients: &Arc<AtomicUsize>,
 ) {
     let mut buffer = [0u8; vban_common::MAX_PACKET_SIZE];
     let mut subscribers: HashMap<SocketAddr, Instant> = HashMap::new();
@@ -151,6 +171,7 @@ fn serve(
         if Instant::now() >= next_send {
             frame = frame.wrapping_add(1);
             send_state(socket, &mut subscribers, state, frame);
+            clients.store(subscribers.len(), Ordering::Relaxed);
             next_send += TICK;
             if next_send < Instant::now() {
                 next_send = Instant::now() + TICK;
