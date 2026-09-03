@@ -81,6 +81,20 @@ impl Server {
     /// port may well be taken by an actual Voicemeeter bridge or another
     /// copy of the same program, and refusing to start because a network
     /// feature could not is the wrong trade.
+    ///
+    /// # What this opens
+    ///
+    /// Every interface, deliberately - a control surface is usually on
+    /// another machine, and that is what the protocol is for. There is no
+    /// authentication in VBAN, so anything that can reach the port can set
+    /// any parameter the mixer accepts.
+    ///
+    /// The mixer's answer to that is the Limit Remote Gain option, which
+    /// holds an arriving gain to unity so a stray or hostile packet cannot
+    /// drive a strip to the top of its travel. It is off by default, as in
+    /// the original. Said here as well as at the point that enforces it,
+    /// because someone reading the server should not have to find a comment
+    /// in another crate to learn what the port exposes.
     #[must_use]
     pub fn start(port: u16, identity: Identity) -> Option<Self> {
         let socket = match UdpSocket::bind(("0.0.0.0", port)) {
